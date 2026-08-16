@@ -74,11 +74,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [frontend, order-api, inventory-api, payment-api, external-stub, member-api]
+        include:
+          - service: frontend
+            context: apps/frontend
+          - service: order-api
+            context: apps/order-api
+          - service: inventory-api
+            context: apps/inventory-api
+          - service: payment-api
+            context: apps/payment-api
+          - service: external-stub
+            context: apps/external-stub
+          - service: member-api
+            context: apps/member-api
+          # Collector だけ context が platform/ 配下（設定を焼き込むため）。
+          # **デプロイでビルドするものは CI でもビルドする。**
+          # ここに無いと「デプロイ時に初めてビルドが壊れている」と分かることになる
+          - service: otel-collector
+            context: platform/otel-collector
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: build ${{ matrix.service }}
-        run: docker build -t roastery/${{ matrix.service }}:ci apps/${{ matrix.service }}
+        run: docker build -t roastery/${{ matrix.service }}:ci ${{ matrix.context }}
 
   # =========================================================================
   # 統合テスト。docker compose で一式立ち上げて UC-01 を通す。
@@ -98,7 +115,11 @@ jobs:
           sed -i 's/^COLLECTOR_CONFIG=.*/COLLECTOR_CONFIG=config.local.yaml/' .env
           docker compose up -d --build
       - name: verify
-        run: ./scripts/verify.sh
+        # **`./scripts/verify.sh` と書かない。**
+        # Windows の git は core.fileMode=false で実行ビットを記録しないため、
+        # 100644 でコミットされると CI で Permission denied になる。
+        # bash に渡せばモードに依存しない（リポジトリ側も chmod +x してある）。
+        run: bash scripts/verify.sh
       - name: dump logs on failure
         if: failure()
         run: docker compose logs --tail=200
