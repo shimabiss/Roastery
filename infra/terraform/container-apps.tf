@@ -42,6 +42,11 @@ resource "azurerm_container_app_environment" "this" {
   # コンテナの stdout/stderr が Log Analytics の ContainerAppConsoleLogs_CL に入る。
   # OpenTelemetry で送っているトレース・メトリクスとは **別系統** である点に注意。
   # 「アプリが自分で送るテレメトリ」と「基盤が拾うログ」は取得経路が違う。
+  #
+  # logs_destination は省略可能だが **明示する。**
+  # 省略すると provider 側が API の値を取り込む Optional+Computed になり、
+  # 「1回目は通るが2回目の plan に差分が出る」類の挙動を招きやすい。
+  logs_destination           = "log-analytics"
   log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
 
   tags = local.tags
