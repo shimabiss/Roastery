@@ -51,7 +51,7 @@ output "ops_url" {
     URL を知っていれば誰でも障害注入と出荷操作ができる。
     docs/security-checklist.md の未対応項目。
   EOT
-  value = try("https://${azurerm_container_app.frontend[0].ingress[0].fqdn}/ops", null)
+  value       = try("https://${azurerm_container_app.frontend[0].ingress[0].fqdn}/ops", null)
 }
 
 output "container_app_environment_name" {

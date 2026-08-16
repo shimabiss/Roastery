@@ -115,8 +115,8 @@ variable "deploy_container_apps" {
     （min_replicas = 1 のため）。使わない期間はここを false にして
     `terraform apply` すると止められる。
   EOT
-  type    = bool
-  default = true
+  type        = bool
+  default     = true
 }
 
 variable "image_registry" {
@@ -131,7 +131,7 @@ variable "image_repository" {
     最終的なイメージ名は <registry>/<repository>/<サービス名>:<tag> になる。
       例: ghcr.io/your-name/roastery/order-api:sha-abc1234
   EOT
-  type = string
+  type        = string
 
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9._/-]*$", var.image_repository))
@@ -147,8 +147,8 @@ variable "image_tag" {
     state からも Azure からも分からなくなり、切り戻しもできない。
     CI からはコミット SHA を渡す（例: sha-abc1234）。
   EOT
-  type    = string
-  default = "main"
+  type        = string
+  default     = "main"
 }
 
 variable "min_replicas" {
@@ -157,8 +157,8 @@ variable "min_replicas" {
     **最初の1リクエストがコールドスタートで数秒かかる。**
     デモの直前に一度叩いて温めておくとよい。
   EOT
-  type    = number
-  default = 0
+  type        = number
+  default     = 0
 
   validation {
     condition     = var.min_replicas >= 0 && var.min_replicas <= 5
@@ -182,8 +182,8 @@ variable "container_cpu" {
     コンテナの vCPU。**メモリとの組み合わせが決まっている**ので勝手な値は入らない。
       0.25 -> 0.5Gi / 0.5 -> 1Gi / 0.75 -> 1.5Gi / 1 -> 2Gi / 1.25 -> 2.5Gi ...
   EOT
-  type    = number
-  default = 0.25
+  type        = number
+  default     = 0.25
 }
 
 variable "container_memory" {

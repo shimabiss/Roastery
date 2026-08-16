@@ -356,3 +356,26 @@ cumulative のままだとグラフが期待どおりになりません。
 - 4サービスを跨ぐ 18 span の trace、カスタムメトリクス、trace_id 付きログの出力を確認済み
 - Collector のイメージタグは `.env` の `COLLECTOR_VERSION` で固定できます。
   再現性が必要な場面では `latest` ではなく具体的なバージョンに固定してください
+
+## 10. ライセンス
+
+**コード・ドキュメントは [MIT License](LICENSE)** です。自由に読んで、真似して、
+持ち帰ってください。
+
+**ただし MIT が及ぶのはこのリポジトリで書いたものだけです。**
+同梱している写真は撮影者に権利があり、別のライセンスに従います。
+
+| 対象 | ライセンス | 備考 |
+|---|---|---|
+| `apps/` `infra/` `platform/` `scripts/` `tests/` のコード | MIT | |
+| `docs/` の文書 | MIT | 要件定義・ADR を含む |
+| `apps/frontend/client/assets/` の画像 | [Unsplash License](https://unsplash.com/license) | **MIT ではありません。**出典は [CREDITS.md](apps/frontend/client/assets/CREDITS.md) |
+
+画像を再利用する場合は Unsplash License の条件（**他のストック写真・壁紙サイトへの
+再配布は不可**）を直接確認してください。このリポジトリを fork してサイトの素材として
+使う分には範囲内ですが、画像だけ抜き出して別途配布するのは想定されていません。
+
+依存ライブラリはそれぞれのライセンスに従います
+（`apps/*/requirements.txt`・`apps/frontend/package.json`）。
+
+> このリポジトリは業務ではなく個人の学習用に作っています。
