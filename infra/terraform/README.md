@@ -349,6 +349,98 @@ GitHub Actions から止める場合は Run workflow で `deploy_container_apps`
 します。Log Analytics と Application Insights は残るので、ローカルの docker compose から
 テレメトリを送る構成はそのまま使えます。
 
+## 環境を削除する
+
+**3段階あります。** 上から順に、戻すのが簡単な順です。
+
+| | やること | 消えるもの | 戻し方 |
+|---|---|---|---|
+| 1 | 止める | Container Apps 9 本 | もう一度 apply（数分） |
+| 2 | Azure リソースを消す | 上に加えて Log Analytics / App Insights / リソースグループ | apply（`var.instance` の変更が要る場合あり） |
+| 3 | 完全に撤去する | 上に加えて state・OIDC・GHCR・GitHub の設定 | ブートストラップからやり直し |
+
+### 段階 1: 止めるだけ（課金をほぼゼロに）
+
+**普段使わない期間はこれで十分です。**
+
+Actions → deploy → Run workflow → `deploy_container_apps` を **`false`**
+
+Container Apps が 9 本とも消え、Log Analytics と Application Insights だけが残ります。
+アイドル課金の元だった `postgres` / `redis` / `otel-collector` が無くなるので、
+**Container Apps の請求はゼロになります。**
+
+ローカルの docker compose からテレメトリを Azure に送る構成はそのまま使えます。
+戻すときは `true` で apply し直すだけです（**データは消えます。** 永続ボリュームが無いため）。
+
+### 段階 2: Azure のリソースを消す
+
+Actions → **destroy** → Run workflow → `confirm` に **`destroy-dev`** と入力
+
+`terraform destroy` が走り、リソースグループごと消えます。
+実行前に「何が消えるか」がジョブのサマリに出るので、目視してから進めてください。
+
+手元に terraform がある場合は同じことを次でもできます。
+
+```bash
+cd infra/terraform
+terraform init -backend-config=backend.hcl
+terraform plan -destroy      # 先に何が消えるか見る
+terraform destroy
+```
+
+> **`terraform destroy` にも `image_repository` が要ります。**
+> 変数に既定値が無いため、指定しないと destroy 自体が始まりません。
+> ワークフローは自動で渡しています。手元から流す場合は `terraform.tfvars` に書いておいてください。
+
+**Log Analytics は削除後 14 日間、同名で再作成できません**（論理削除）。
+すぐ作り直したい場合は `var.instance` を `002` に上げるか、次で完全削除します。
+
+```bash
+# 論理削除されたワークスペースを完全に消す（同名で作り直したいとき）
+az monitor log-analytics workspace list-deleted-workspaces -o table
+az monitor log-analytics workspace delete \
+  -g rg-roastery-dev-je-001 -n log-roastery-dev-je-001 --force --yes
+```
+
+### 段階 3: 完全に撤去する
+
+`terraform destroy` では**消えないもの**が4つあります。
+ブートストラップで作ったものと、GitHub 側の設定です。
+
+```bash
+# 1. state 置き場（ストレージアカウントごと）
+#    **これを消すと state が失われます。** 段階 2 を先に済ませてから
+az group delete -n rg-roastery-tfstate --yes
+
+# 2. Entra ID のアプリ登録
+#    サービスプリンシパルとフェデレーション資格情報も一緒に消えます
+az ad app delete --id <AZURE_CLIENT_ID>
+
+# 3. ロール割り当ての残骸を確認（アプリ削除後は孤児として残ることがある）
+az role assignment list --all --query "[?principalName==null].{role:roleDefinitionName,scope:scope}" -o table
+```
+
+PowerShell でも同じコマンドがそのまま使えます。
+
+**GitHub 側**（ブラウザでの操作）:
+
+- Settings → Environments → `dev` を削除（変数 5 つも一緒に消えます）
+- `https://github.com/users/<owner>/packages` → 各パッケージ → Package settings → Delete package（7 つ）
+
+### 消し忘れを確認する
+
+```bash
+# roastery が付くリソースグループが残っていないか
+az group list --query "[?contains(name,'roastery')].name" -o tsv
+
+# 課金が続いていないか（前日ぶんまで反映）
+az consumption usage list --start-date 2026-08-01 --end-date 2026-08-31 \
+  --query "[?contains(instanceName,'roastery')].{name:instanceName,cost:pretaxCost}" -o table
+```
+
+**最終確認は Cost Management で行ってください。** リソースを消しても、
+その月に発生済みのぶんは請求に残ります。翌日以降にゼロになっていれば完了です。
+
 ## 既知の未対応
 
 | 内容 | 影響 |

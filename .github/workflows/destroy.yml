@@ -1,0 +1,138 @@
+# ---------------------------------------------------------------------------
+# Azure 上のリソースを terraform destroy で削除する。
+#
+# **なぜワークフローにするのか**
+#   手元に terraform を入れなくても消せるようにするため。
+#   「作るのは CI、消すのは手元」だと、**消す手順だけ検証されないまま残る。**
+#   壊し方が確認できていない環境は、結局こわくて壊せない。
+#
+# **安全装置**
+#   - workflow_dispatch のみ。push でも PR でも絶対に走らない
+#   - confirm 入力に環境名を打たないと先へ進まない（誤クリック防止）
+#   - concurrency を deploy と同じグループにして、apply と同時に走らせない
+#   - environment: dev を通すので、Environment に承認者を設定すれば
+#     **承認なしでは destroy できなくなる**（推奨）
+#
+# **これで消えないもの**（Terraform の管理外。infra/terraform/README.md 参照）
+#   - state 置き場   rg-roastery-tfstate
+#   - Entra ID のアプリ登録 / フェデレーション資格情報 / ロール割り当て
+#   - GHCR のパッケージ
+#   - GitHub の Environment 変数
+# ---------------------------------------------------------------------------
+name: destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "確認のため destroy-dev と入力してください"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # deploy と同じグループ。**apply と destroy が同時に走ると state が壊れる**
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  ENVIRONMENT: dev
+
+jobs:
+  destroy:
+    name: terraform destroy (dev)
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      # if: で弾くとジョブが「スキップ」になり、**成功と見分けがつかない。**
+      # 明示的に落として理由をログに出す
+      - name: 確認文字列を検証する
+        run: |
+          if [ "${{ inputs.confirm }}" != "destroy-${{ env.ENVIRONMENT }}" ]; then
+            echo "::error::confirm に 'destroy-${{ env.ENVIRONMENT }}' と入力してください（入力値: '${{ inputs.confirm }}'）"
+            exit 1
+          fi
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: リポジトリ名を小文字にする
+        id: repo
+        run: echo "lower=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.13.3"
+          terraform_wrapper: false
+
+      - name: terraform init
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=${{ env.ENVIRONMENT }}.terraform.tfstate"
+
+      # **消す前に何が消えるかをログに残す。**
+      # destroy は取り消せないので、後から「何があったか」を追える形にしておく
+      - name: 消えるものを一覧する
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_environment: ${{ env.ENVIRONMENT }}
+          TF_VAR_image_repository: ${{ steps.repo.outputs.lower }}
+        run: |
+          # image_repository は destroy でも必須。**変数が欠けると destroy 自体が始まらない**
+          terraform plan -destroy -input=false -out=tfdestroy
+          {
+            echo "### 削除対象"
+            echo '```'
+            terraform show -no-color tfdestroy | grep -E '^  # ' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: terraform destroy
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: terraform apply -input=false tfdestroy
+
+      - name: 残っているものを案内する
+        if: success()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+
+          ### まだ残っているもの（Terraform の管理外）
+
+          - state 置き場: `${{ vars.TFSTATE_RESOURCE_GROUP }}` / `${{ vars.TFSTATE_STORAGE_ACCOUNT }}`
+          - Entra ID のアプリ登録: `gh-roastery-${{ env.ENVIRONMENT }}`（AppId `${{ vars.AZURE_CLIENT_ID }}`）
+          - GHCR のパッケージ 7 つ
+          - GitHub の Environment `${{ env.ENVIRONMENT }}` の変数
+
+          完全に撤去する手順は `infra/terraform/README.md` の「環境を削除する」を参照。
+
+          **Log Analytics は 14 日間の論理削除**が働くため、同名での再作成はできません。
+          すぐ作り直す場合は `var.instance` を `002` に上げてください。
+          EOF
