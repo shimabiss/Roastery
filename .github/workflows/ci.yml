@@ -66,6 +66,32 @@ jobs:
       - run: npm run build
 
   # =========================================================================
+  # Terraform の整形チェック。
+  #
+  # **deploy.yml にも同じ fmt -check があるが、あちらは workflow_dispatch のみ。**
+  # そのため整形が崩れていても PR では気づけず、デプロイしようとした瞬間に落ちる。
+  # ここに置けば PR の時点で止まる。
+  #
+  # init も Azure 認証も要らない (ローカルのファイルを読むだけ) ので数秒で終わる。
+  # validate はプロバイダのスキーマ取得 = init が要るため、ここではやらない。
+  # =========================================================================
+  terraform:
+    name: terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          # **deploy.yml と同じ版に揃える。** 整形規則は版によって変わりうるので、
+          # ここだけ新しいと「CI は通るのに deploy で落ちる」が起きる。
+          terraform_version: "1.13.3"
+          terraform_wrapper: false
+      - name: terraform fmt -check
+        working-directory: infra/terraform
+        # -diff を付けて、落ちたときにどこがずれているかをログに出す
+        run: terraform fmt -check -recursive -diff
+
+  # =========================================================================
   # コンテナがビルドできること。push はしない (デプロイは別ワークフロー)
   # =========================================================================
   images:
