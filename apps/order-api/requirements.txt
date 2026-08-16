@@ -1,0 +1,17 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+httpx==0.28.1
+psycopg[binary,pool]==3.3.4
+pydantic==2.13.4
+
+# --- OpenTelemetry ---
+# core (API/SDK/exporter) と instrumentation はバージョン体系が違う。
+#   core: 1.44.0  <->  instrumentation: 0.65b0
+# ここがズレると起動時に読み込みエラーになるので、必ずセットで上げる。
+opentelemetry-distro==0.65b0
+opentelemetry-exporter-otlp-proto-grpc==1.44.0
+opentelemetry-instrumentation-fastapi==0.65b0
+opentelemetry-instrumentation-httpx==0.65b0
+opentelemetry-instrumentation-psycopg==0.65b0
+opentelemetry-instrumentation-logging==0.65b0
+opentelemetry-instrumentation-system-metrics==0.65b0

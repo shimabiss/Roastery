@@ -1,0 +1,27 @@
+{
+  "name": "roastery-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "start": "node --require @opentelemetry/auto-instrumentations-node/register server/server.js"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/auto-instrumentations-node": "0.79.0",
+    "@opentelemetry/exporter-metrics-otlp-grpc": "0.221.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "0.221.0",
+    "@opentelemetry/sdk-node": "0.221.0",
+    "express": "5.2.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.8",
+    "typescript": "5.9.3",
+    "vite": "8.2.1",
+    "vue": "3.5.41",
+    "vue-tsc": "3.3.10"
+  }
+}

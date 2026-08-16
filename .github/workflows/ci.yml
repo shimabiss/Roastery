@@ -1,0 +1,107 @@
+# ---------------------------------------------------------------------------
+# アプリの CI。
+#
+# 方針 (docs/requirements/07-implementation-scope.md 「5. 機能以外に作るもの」)
+#   **CI/CD を題材にするなら、機能を増やすよりテストを書くほうが効く。**
+#   このワークフローが検証しているのは、機能一覧 (02) には1行も出てこない。
+#
+# セキュリティ (docs/security-checklist.md)
+#   - パブリックリポジトリなので **すべてのアクションを 40 桁の commit SHA で固定**する。
+#     タグは付け替えられる。`@v4` は「その時点で v4 が指しているもの」でしかない。
+#   - `permissions` を既定で contents: read に落とす。
+#   - `pull_request` を使う (`pull_request_target` は **使わない**)。
+#     後者はベースリポジトリの権限とシークレットを持ったまま PR のコードを扱うため、
+#     フォークからの PR で任意コード実行に直結する。
+# ---------------------------------------------------------------------------
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =========================================================================
+  # ユニットテスト。Redis も Postgres も起動しない = 速い = よく回る
+  # =========================================================================
+  unit:
+    name: unit tests (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r tests/requirements.txt
+      - name: pytest
+        run: python -m pytest -q
+
+  # =========================================================================
+  # 型チェックとビルド。実行時に落ちるより前に落とす
+  # =========================================================================
+  frontend:
+    name: typecheck & build (vue)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  # =========================================================================
+  # コンテナがビルドできること。push はしない (デプロイは別ワークフロー)
+  # =========================================================================
+  images:
+    name: docker build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend, order-api, inventory-api, payment-api, external-stub, member-api]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: build ${{ matrix.service }}
+        run: docker build -t roastery/${{ matrix.service }}:ci apps/${{ matrix.service }}
+
+  # =========================================================================
+  # 統合テスト。docker compose で一式立ち上げて UC-01 を通す。
+  #
+  # **異常系まで含めて検証する**のがここの主眼。
+  # UC-01 の E1〜E5 は、そのままテストケースの一覧になっている。
+  # =========================================================================
+  integration:
+    name: integration (docker compose)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: start stack
+        run: |
+          cp .env.example .env
+          # Azure に送らないローカル専用の Collector 設定を使う
+          sed -i 's/^COLLECTOR_CONFIG=.*/COLLECTOR_CONFIG=config.local.yaml/' .env
+          docker compose up -d --build
+      - name: verify
+        run: ./scripts/verify.sh
+      - name: dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+      - name: stop stack
+        if: always()
+        run: docker compose down -v

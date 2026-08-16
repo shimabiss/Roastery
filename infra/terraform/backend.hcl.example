@@ -1,0 +1,16 @@
+# terraform init -backend-config=backend.hcl で読み込む設定。
+#
+#   cp backend.hcl.example backend.hcl
+#
+# backend.hcl は .gitignore 対象です。秘密情報は含みませんが、
+# Public リポジトリにストレージアカウント名を置かないための措置です。
+#
+# 値は scripts/tf-bootstrap.sh の実行時に出力されます。
+
+resource_group_name  = "rg-roastery-tfstate"
+storage_account_name = "stroasterytfstateXXXX"
+container_name       = "tfstate"
+
+# 環境ごとにキーを分ける。**同じキーを共有すると、dev の apply が
+# 本番の state を書き換える。** 環境の分離は state の分離から始まる。
+key = "dev.terraform.tfstate"

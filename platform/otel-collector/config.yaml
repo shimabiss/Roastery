@@ -1,0 +1,114 @@
+# ===========================================================================
+# OpenTelemetry Collector 設定 (Azure Monitor 連携 + ローカル可視化の併用)
+#
+# このファイルで押さえる点:
+#   * アプリは「OTLP で Collector に投げる」しか知らない。
+#     どのバックエンドに流すかは Collector 側の設定だけで決まる。
+#   * 同じデータを Application Insights と Jaeger/Prometheus に
+#     "同時に" 流せる。バックエンド移行やマルチベンダー併用がこれで効く。
+#   * processor で属性の付与・PII のマスク・サンプリングを一元管理できる。
+#     アプリを再デプロイせずに運用ポリシーを変えられるのが Collector の価値。
+# ===========================================================================
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # メモリ保護。Collector 自身が OOM で落ちないための必須設定。
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  # 送信をまとめて効率化する。本番では必ず入れる。
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  # すべてのテレメトリに共通の属性を後付けする。
+  # 「アプリを触らずに環境情報を足せる」という Collector の実演に使う。
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:DEPLOY_ENV}
+        action: upsert
+      - key: service.namespace
+        value: roastery
+        action: upsert
+
+  # PII マスクの例。実運用で必ず話題になるので入れてある。
+  attributes/redact:
+    actions:
+      - key: enduser.id
+        action: hash
+
+exporters:
+  # --- Azure Monitor (Application Insights) ---
+  # 接続文字列は環境変数 APPLICATIONINSIGHTS_CONNECTION_STRING から読む。
+  azuremonitor:
+    connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+    # span event を Application Insights の traces テーブルに出す。
+    # 手動計装で add_event した内容が Azure 側で見えるようになる。
+    spaneventsenabled: true
+    maxbatchsize: 512
+    maxbatchinterval: 10s
+
+  # --- ローカル可視化 (比較用) ---
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # データ点が来なくなったメトリクスを何分間公開し続けるか。
+    # delta temporality では、注文が止まるとデータ点自体が届かなくなるため、
+    # ここを過ぎると orders_created_total などがエンドポイントから消える。
+    # 「メトリクスが消えた」の原因になりやすいので、既定値でも明示しておく。
+    metric_expiration: 5m
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # --- 標準出力 (デバッグ用。「生の OTLP」を確認するのに便利) ---
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, attributes/redact, batch]
+      exporters: [azuremonitor, otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [azuremonitor, prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, attributes/redact, batch]
+      exporters: [azuremonitor, debug]
+
+  # Collector 自身のメトリクスを外部から scrape できるように公開する。
+  # (既定は localhost バインドで、別コンテナの Prometheus からは見えない)
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

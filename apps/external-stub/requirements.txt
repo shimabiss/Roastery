@@ -1,0 +1,10 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+pydantic==2.13.4
+
+# --- OpenTelemetry ---
+opentelemetry-distro==0.65b0
+opentelemetry-exporter-otlp-proto-grpc==1.44.0
+opentelemetry-instrumentation-fastapi==0.65b0
+opentelemetry-instrumentation-logging==0.65b0
+opentelemetry-instrumentation-system-metrics==0.65b0

@@ -1,0 +1,11 @@
+# Windows でクローンしても改行が CRLF にならないようにする。
+# CRLF になると WSL2 側で `bad interpreter: /usr/bin/env bash^M` で起動できない。
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.py   text eol=lf
+*.js   text eol=lf
+*.sql  text eol=lf
+Dockerfile text eol=lf

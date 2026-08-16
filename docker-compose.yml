@@ -1,0 +1,254 @@
+name: roastery
+
+# ---------------------------------------------------------------------------
+# 全アプリ共通の OpenTelemetry 設定。
+# 「アプリのコードではなく環境変数で設定する」のが OTel の作法。
+# ---------------------------------------------------------------------------
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  OTEL_TRACES_EXPORTER: otlp
+  OTEL_METRICS_EXPORTER: otlp
+  OTEL_LOGS_EXPORTER: otlp
+  # Application Insights のメトリクス体験には delta temporality が必要
+  OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: DELTA
+  OTEL_METRIC_EXPORT_INTERVAL: "15000"
+  # 全 span を送る。本番では tail sampling などに置き換える
+  OTEL_TRACES_SAMPLER: parentbased_always_on
+  OTEL_RESOURCE_ATTRIBUTES: "service.version=1.0.0,deployment.environment=${DEPLOY_ENV:-workshop}"
+
+x-python-otel-env: &python-otel-env
+  # ログの出力に trace_id / span_id を埋め込む (ログ <-> トレース往復のキモ)
+  OTEL_PYTHON_LOG_CORRELATION: "true"
+  OTEL_PYTHON_LOG_LEVEL: info
+  # ヘルスチェックは trace に出さない (ノイズ削減)
+  OTEL_PYTHON_EXCLUDED_URLS: "healthz"
+  # FastAPI だけはアプリ側で明示的に計装する。理由は app/main.py のコメント参照。
+  OTEL_PYTHON_DISABLED_INSTRUMENTATIONS: "fastapi"
+
+services:
+  # =========================================================================
+  # 可観測性基盤
+  # =========================================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${COLLECTOR_VERSION:-latest}
+    container_name: otel-collector
+    command: ["--config=/etc/otelcol/${COLLECTOR_CONFIG:-config.yaml}"]
+    volumes:
+      - ./platform/otel-collector:/etc/otelcol:ro
+    environment:
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
+      DEPLOY_ENV: ${DEPLOY_ENV:-workshop}
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "8888:8888"    # Collector 自身の内部メトリクス
+      - "8889:8889"    # アプリのメトリクス (Prometheus 形式)
+      - "13133:13133"  # health_check
+      - "55679:55679"  # zPages (Collector 自身の中身を覗く)
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--help"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.65.0
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: prometheus
+    volumes:
+      - ./platform/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    profiles: ["grafana"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports:
+      - "3001:3000"
+
+  # =========================================================================
+  # データストア
+  # =========================================================================
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+    volumes:
+      - ./platform/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # =========================================================================
+  # アプリケーション
+  # =========================================================================
+  frontend:
+    build: ./apps/frontend
+    container_name: frontend
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: frontend
+      # クラウドのメタデータ検出を試みて警告が出るのを避ける
+      OTEL_NODE_RESOURCE_DETECTORS: env,host,os,container
+      # express/router のミドルウェア span を抑制して waterfall を読みやすくする
+      OTEL_NODE_DISABLED_INSTRUMENTATIONS: express,router,connect,fs,dns,net
+      ORDER_API_URL: http://order-api:8000
+      INVENTORY_API_URL: http://inventory-api:8000
+      PAYMENT_API_URL: http://payment-api:8000
+      EXTERNAL_STUB_URL: http://external-stub:8000
+      MEMBER_API_URL: http://member-api:8000
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - order-api
+      - member-api
+      - otel-collector
+
+  order-api:
+    build: ./apps/order-api
+    container_name: order-api
+    environment:
+      <<: [*otel-env, *python-otel-env]
+      OTEL_SERVICE_NAME: order-api
+      INVENTORY_API_URL: http://inventory-api:8000
+      PAYMENT_API_URL: http://payment-api:8000
+      DATABASE_URL: postgresql://demo:demo@postgres:5432/demo
+      # 注文確認メール (FR-1001) / 発送通知 (FR-1002) の送信先
+      EXTERNAL_STUB_URL: http://external-stub:8000
+      # 発送通知の宛先を解決するために会員のメールを引く
+      MEMBER_API_URL: http://member-api:8000
+      # FR-404: 送料は配送先の都道府県から算出する (app/shipping.py)。
+      # 閾値だけ環境変数で動かせるようにしてある
+      FREE_SHIPPING_THRESHOLD: "5000"
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inventory-api:
+        condition: service_started
+      payment-api:
+        condition: service_started
+      member-api:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+
+  inventory-api:
+    build: ./apps/inventory-api
+    container_name: inventory-api
+    environment:
+      <<: [*otel-env, *python-otel-env]
+      OTEL_SERVICE_NAME: inventory-api
+      REDIS_HOST: redis
+      CHAOS_SLOW_MS: "0"
+    ports:
+      - "8002:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  payment-api:
+    build: ./apps/payment-api
+    container_name: payment-api
+    environment:
+      <<: [*otel-env, *python-otel-env]
+      OTEL_SERVICE_NAME: payment-api
+      # 決済代行そのものは external-stub が模す。payment-api はその手前に立ち、
+      # 冪等キーの管理と決済状態の永続化を担当する。
+      EXTERNAL_STUB_URL: http://external-stub:8000
+      DATABASE_URL: postgresql://demo:demo@postgres:5432/demo
+      # 「無応答」を無応答として検出するために必須。長すぎると異常系が再現できない
+      GATEWAY_TIMEOUT_S: "5"
+    ports:
+      - "8003:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      external-stub:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+
+  # -------------------------------------------------------------------------
+  # 会員・セッション・住所帳・カート。
+  # P2 は4つの学習テーマを1つも支えないが、会員必須にした以上これが無いと
+  # 1件も売れない。**依存駆動**でスコープに入っている段。
+  # -------------------------------------------------------------------------
+  member-api:
+    build: ./apps/member-api
+    container_name: member-api
+    environment:
+      <<: [*otel-env, *python-otel-env]
+      OTEL_SERVICE_NAME: member-api
+      DATABASE_URL: postgresql://demo:demo@postgres:5432/demo
+      REDIS_HOST: redis
+      EXTERNAL_STUB_URL: http://external-stub:8000
+      # 確認メールに載せるリンクの起点
+      SITE_URL: http://localhost:3000
+    ports:
+      - "8005:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      external-stub:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+
+  # -------------------------------------------------------------------------
+  # 外部サービス (決済代行 / メール配信 / 配送業者) の模擬。
+  # 3つに分けず1サービスにまとめている。スタブは学習対象ではないため、
+  # 分ければ ACA のコンテナが3つ増え、IaC とデプロイのコストだけが上がる。
+  #   -> docs/requirements/07-implementation-scope.md 「4. スタブサービスの設計」
+  # -------------------------------------------------------------------------
+  external-stub:
+    build: ./apps/external-stub
+    container_name: external-stub
+    environment:
+      <<: [*otel-env, *python-otel-env]
+      OTEL_SERVICE_NAME: external-stub
+      CHAOS_LATENCY_MS: "0"
+      CHAOS_ERROR_RATE: "0"
+      CHAOS_NO_RESPONSE_RATE: "0"
+    ports:
+      - "8004:8000"
+    depends_on:
+      otel-collector:
+        condition: service_started

@@ -1,0 +1,33 @@
+.env
+.env.bak
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Terraform
+.terraform/
+.terraform.tfstate.lock.info
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+# backend の設定。秘密情報は含まないが、Public リポジトリに
+# ストレージアカウント名を置かないため除外する
+backend.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# .terraform.lock.hcl はコミットする（プロバイダの版を固定するため）
+
+# 画像の元ファイル。変換後の WebP/JPEG だけをコミットする
+# （元の写真は数 MB あり、リポジトリを太らせるだけで使われない）
+apps/frontend/client/assets/_original/
+
+# Cowork のデバイス連携はファイルを削除できないため、消したいものを
+# ここへ退避する運用にしている。**コミット対象にしない**
+_to_delete/

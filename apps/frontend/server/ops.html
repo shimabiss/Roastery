@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Roastery — 運用画面</title>
+<!--
+  運用画面（/ops）。障害注入と動作確認のための画面。
+  公開サイト（/）とは配信元のディレクトリを分けてある（src/ops/ と src/public/）。
+
+  注意: パスを分けただけではアクセス制御にはならない。
+  クラウドに載せる際は ingress をサービス単位で分離するか、
+  この画面と /api/chaos/* に認証を掛ける必要がある。
+  docs/security-checklist.md の「3. デプロイ後の Azure 側」を参照。
+-->
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2027; --panel2: #0b0f14; --border: #2a333d;
+    --fg: #e6edf3; --muted: #8b97a3; --accent: #4b9fd5;
+    --ok: #3fb950; --warn: #d29922; --err: #f85149; --purple: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 24px 48px; background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .sub a { color: var(--accent); }
+  .badge {
+    border: 1px solid var(--warn); color: var(--warn); border-radius: 999px;
+    padding: 3px 12px; font-size: 11px; font-weight: 700; letter-spacing: .06em; white-space: nowrap;
+  }
+  .warnbar {
+    margin: 18px 0 22px; padding: 10px 14px; border-radius: 8px; font-size: 12.5px;
+    background: #2a2113; border: 1px solid #4a3a1a; color: #e3c675;
+  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  .panel h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+    margin: 0 0 16px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; align-items: center;
+  }
+  .panel h2 .note { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 11px; }
+  .item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .item:last-child { border-bottom: none; }
+  .item .name { font-size: 14px; }
+  .item .meta { color: var(--muted); font-size: 12px; }
+  .low { color: var(--warn); } .zero { color: var(--err); }
+  button {
+    background: var(--accent); color: #06121c; border: none; border-radius: 6px;
+    padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+  button.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+  button.danger { background: var(--err); color: #1a0505; }
+  button.on { outline: 2px solid var(--warn); outline-offset: 1px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--accent); }
+  .state {
+    margin-top: 14px; padding: 10px 12px; border-radius: 6px; background: var(--panel2);
+    border: 1px solid var(--border); font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+  }
+  .state .k { color: var(--muted); }
+  .state .on { color: var(--warn); font-weight: 700; }
+  .state .off { color: var(--muted); }
+  .links { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  @media (max-width: 560px) { .links { grid-template-columns: 1fr; } }
+  .links a {
+    display: block; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel2); text-decoration: none; color: var(--fg); font-size: 13px;
+  }
+  .links a:hover { border-color: var(--accent); }
+  .links a span { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+  #log {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+    height: 280px; overflow-y: auto; white-space: pre-wrap;
+  }
+  .l-ok { color: var(--ok); } .l-err { color: var(--err); }
+  .l-warn { color: var(--warn); } .l-dim { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="head">
+    <div>
+      <h1>Roastery — 運用画面</h1>
+      <div class="sub">障害注入と動作確認 &middot; <a href="/">公開サイトへ戻る</a></div>
+    </div>
+    <span class="badge">INTERNAL</span>
+  </div>
+
+  <div class="warnbar">
+    この画面はパスを分けているだけで、<strong>アクセス制御はされていません</strong>。
+    クラウドに載せる際は ingress の分離か認証が必要です（<code>docs/security-checklist.md</code>）。
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2><span>在庫と注文</span><span class="note">動作確認用</span></h2>
+      <div id="catalog"><span class="l-dim" style="font-size:13px">読み込み中…</span></div>
+      <div class="row" style="margin-top:16px">
+        <button class="ghost" onclick="loadCatalog()">再読込</button>
+        <button class="ghost" onclick="burst(20)">20件まとめて注文</button>
+        <button class="ghost" onclick="orderSku('DRIP-KETTLE', 999)">在庫不足を再現</button>
+        <button class="ghost" onclick="resetAll()">在庫リセット</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2><span>障害注入 (Chaos)</span></h2>
+      <div class="item">
+        <div>
+          <div class="name">payment-api の遅延</div>
+          <div class="meta">決済処理に固定の待ち時間を足す</div>
+        </div>
+        <div class="row" style="margin:0">
+          <button id="c-lat-1500" onclick="chaosPayment(1500, null)">+1.5s</button>
+          <button id="c-lat-3000" onclick="chaosPayment(3000, null)">+3s</button>
+        </div>
+      </div>
+      <div class="item">
+        <div>
+          <div class="name">payment-api のエラー率</div>
+          <div class="meta">一定割合を 500 で失敗させる</div>
+        </div>
+        <div class="row" style="margin:0">
+          <button id="c-err-03" onclick="chaosPayment(null, 0.3)">30%</button>
+          <button id="c-err-1" onclick="chaosPayment(null, 1)">100%</button>
+        </div>
+      </div>
+      <div class="item">
+        <div>
+          <div class="name">inventory-api の遅いクエリ</div>
+          <div class="meta">在庫参照を遅くする</div>
+        </div>
+        <div class="row" style="margin:0">
+          <button id="c-inv-800" onclick="chaosInventory(800)">+0.8s</button>
+        </div>
+      </div>
+      <div class="row" style="margin-top:16px">
+        <button class="danger" onclick="clearChaos()">すべて解除</button>
+      </div>
+      <div class="state" id="state"></div>
+      <div class="hint">
+        注入した設定値は <code>chaos.latency_ms</code> として span 属性に載ります。
+        公開サイト（<a href="/" style="color:var(--accent)">/</a>）から注文すると挙動を確認できます。
+      </div>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       受注一覧と出荷処理 (FR-1103 / FR-1104 / FR-1105 / UC-06)
+       ここが UC-06 のデモ画面。「出荷準備中」を挟むことで、
+       キャンセル可否の境界が状態として見える。
+       ===================================================================== -->
+  <div class="panel">
+    <h2>
+      <span>受注一覧</span>
+      <span class="note">UC-06 出荷処理</span>
+    </h2>
+    <div class="row" style="margin-bottom:12px">
+      <button onclick="loadOrders()">再読み込み</button>
+      <button onclick="shipAllAccepted()">受付済をまとめて出荷</button>
+    </div>
+    <div id="orders"><span class="note">読み込み中…</span></div>
+    <div class="hint">
+      <strong>出荷確定は巻き戻せません（BR-31）。</strong>
+      売上確定に失敗すると「出荷準備中」で停止します。決済の障害注入を有効にして
+      出荷すると、<em>後退せずに前進で復旧する</em>挙動が確認できます。
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span>可観測性ツール</span><span class="note">ローカル起動時</span></h2>
+    <div class="links">
+      <a href="http://localhost:16686" target="_blank" rel="noopener">Jaeger<span>トレースの waterfall</span></a>
+      <a href="http://localhost:9090" target="_blank" rel="noopener">Prometheus<span>メトリクス</span></a>
+      <a href="http://localhost:8889/metrics" target="_blank" rel="noopener">Collector の公開メトリクス<span>prometheus 形式</span></a>
+      <a href="http://localhost:55679/debug/tracez" target="_blank" rel="noopener">Collector zPages<span>Collector 自身の中身</span></a>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span>操作ログ</span></h2>
+    <div id="log"><span class="l-dim">操作ログがここに出ます。</span></div>
+  </div>
+
+</div>
+
+<script>
+const logEl = document.getElementById('log');
+let first = true;
+function log(msg, cls = 'l-dim') {
+  if (first) { logEl.innerHTML = ''; first = false; }
+  const t = new Date().toLocaleTimeString('ja-JP');
+  logEl.innerHTML += `<span class="l-dim">${t}</span> <span class="${cls}">${msg}</span>\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function loadCatalog() {
+  const el = document.getElementById('catalog');
+  try {
+    const data = await (await fetch('/api/catalog')).json();
+    el.innerHTML = Object.entries(data).map(([sku, v]) => {
+      const cls = v.stock === 0 ? 'zero' : v.stock <= 5 ? 'low' : '';
+      // 引当可能在庫 (利用者に見せる値) と実在庫・引当済数の内訳を並べる。
+      // **BR-13 の「見せるのは引当可能在庫」が、この画面でだけ破られる。**
+      // 運用担当者は帳簿と現物のずれを見る必要があるため
+      return `<div class="item">
+        <div>
+          <div class="name">${sku}${v.published ? '' : ' <span class="off">非公開</span>'}</div>
+          <div class="meta">
+            ¥${(v.unit_price ?? 0).toLocaleString()} /
+            引当可能 <span class="${cls}">${v.stock}</span>
+            <span class="note">（実在庫 ${v.physical} − 引当済 ${v.reserved}）</span>
+          </div>
+        </div>
+        <div class="row">
+          <button onclick="adjust('${sku}', 10)" title="入荷 (FR-605)">+10</button>
+          <button onclick="adjust('${sku}', -1)" title="棚卸差異 (FR-606)">−1</button>
+          <button onclick="togglePublish('${sku}', ${!v.published})">${v.published ? '非公開' : '公開'}</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    el.innerHTML = `<span class="l-err">カタログ取得に失敗: ${e}</span>`;
+  }
+}
+
+async function orderSku(sku, quantity = 1, quiet = false) {
+  const t0 = performance.now();
+  try {
+    // 運用画面は会員必須の関門を通さない専用経路を使う。
+    // 公開サイトの /api/checkout は BR-18 / BR-19 で 401/403 になる
+    const r = await fetch('/api/ops/orders', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sku, quantity }),
+    });
+    const body = await r.json().catch(() => ({}));
+    const ms = Math.round(performance.now() - t0);
+    if (r.ok) log(`OK   ${sku} x${quantity} order=${String(body.order_id).slice(0,8)} ¥${body.amount} (${ms}ms)`, 'l-ok');
+    else      log(`FAIL ${sku} x${quantity} ${r.status} ${body.detail || ''} (${ms}ms)`, 'l-err');
+  } catch (e) {
+    log(`ERR  ${sku} ${e}`, 'l-err');
+  }
+  if (!quiet) loadCatalog();
+}
+
+async function burst(n) {
+  const skus = ['COFFEE-BEANS-1KG', 'MUG-CERAMIC', 'FILTER-100P', 'DRIP-KETTLE'];
+  log(`${n} 件の注文を送信します…`, 'l-warn');
+  for (let i = 0; i < n; i++) await orderSku(skus[i % skus.length], 1, true);
+  loadOrders();
+  loadCatalog();
+}
+
+let chaos = { latency_ms: 0, error_rate: 0, inv_slow_ms: 0 };
+
+async function chaosPayment(latency, rate) {
+  if (latency !== null) { chaos.latency_ms = chaos.latency_ms === latency ? 0 : latency; chaos.error_rate = 0; }
+  if (rate !== null)    { chaos.error_rate = chaos.error_rate === rate ? 0 : rate; chaos.latency_ms = 0; }
+  await fetch('/api/chaos/payment', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ latency_ms: chaos.latency_ms, error_rate: chaos.error_rate }),
+  });
+  log(`chaos(payment): latency=${chaos.latency_ms}ms error_rate=${chaos.error_rate}`, 'l-warn');
+  renderState();
+}
+
+async function chaosInventory(ms) {
+  chaos.inv_slow_ms = chaos.inv_slow_ms === ms ? 0 : ms;
+  await fetch('/api/chaos/inventory', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ slow_ms: chaos.inv_slow_ms }),
+  });
+  log(`chaos(inventory): slow_ms=${chaos.inv_slow_ms}`, 'l-warn');
+  renderState();
+}
+
+async function clearChaos() {
+  chaos = { latency_ms: 0, error_rate: 0, inv_slow_ms: 0 };
+  await fetch('/api/chaos/payment', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  await fetch('/api/chaos/inventory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  log('chaos: すべて解除しました', 'l-ok');
+  renderState();
+}
+
+async function resetAll() {
+  await fetch('/api/reset', { method: 'POST' });
+  log('在庫をリセットしました', 'l-ok');
+  loadCatalog();
+}
+
+function renderState() {
+  const v = (on, txt) => `<span class="${on ? 'on' : 'off'}">${txt}</span>`;
+  document.getElementById('state').innerHTML =
+    `<span class="k">payment.latency_ms  = </span>${v(chaos.latency_ms > 0, chaos.latency_ms)}<br>` +
+    `<span class="k">payment.error_rate  = </span>${v(chaos.error_rate > 0, chaos.error_rate)}<br>` +
+    `<span class="k">inventory.slow_ms   = </span>${v(chaos.inv_slow_ms > 0, chaos.inv_slow_ms)}`;
+  const mark = (id, on) => { const e = document.getElementById(id); if (e) e.classList.toggle('on', on); };
+  mark('c-lat-1500', chaos.latency_ms === 1500);
+  mark('c-lat-3000', chaos.latency_ms === 3000);
+  mark('c-err-03',   chaos.error_rate === 0.3);
+  mark('c-err-1',    chaos.error_rate === 1);
+  mark('c-inv-800',  chaos.inv_slow_ms === 800);
+}
+
+// 起動時に payment-api の実際の chaos 設定を読んで画面に反映する
+async function syncState() {
+  try {
+    const c = await (await fetch('/api/chaos/payment/status')).json();
+    chaos.latency_ms = c.latency_ms ?? 0;
+    chaos.error_rate = c.error_rate ?? 0;
+  } catch (e) { /* 取得できなければ既定値のまま */ }
+  renderState();
+}
+
+// ===========================================================================
+// 在庫と商品の運用 (FR-605 / FR-606 / FR-1102)
+// ===========================================================================
+async function adjust(sku, delta) {
+  const r = await fetch(`/api/inventory/${sku}/adjust`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ delta }),
+  });
+  const v = await r.json();
+  log(`${sku} 実在庫 ${delta > 0 ? '+' : ''}${delta} → ${v.physical}`, 'l-ok');
+  loadCatalog();
+}
+
+async function togglePublish(sku, published) {
+  await fetch(`/api/ops/products/${sku}`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ published }),
+  });
+  log(`${sku} を${published ? '公開' : '非公開'}にしました`, 'l-ok');
+  loadCatalog();
+}
+
+// ===========================================================================
+// 受注一覧と出荷 (FR-1103 / FR-1104 / FR-1105 / UC-06)
+// ===========================================================================
+let ORDERS = [];
+
+async function loadOrders() {
+  const el = document.getElementById('orders');
+  try {
+    ORDERS = await (await fetch('/api/orders')).json();
+  } catch (e) {
+    el.innerHTML = '<span class="l-ng">受注一覧を取得できませんでした。</span>';
+    return;
+  }
+  if (!ORDERS.length) {
+    el.innerHTML = '<span class="note">注文がありません。公開サイトから注文してください。</span>';
+    return;
+  }
+  el.innerHTML = ORDERS.slice(0, 12).map((o) => {
+    const items = (o.items || []).map((i) => `${i.name} ×${i.quantity}`).join(' / ');
+    // 状態ごとに **次にできる操作だけ** を出す。
+    // 押せないボタンを並べるより、状態遷移表をそのまま画面にするほうが誤操作が減る
+    let actions = '';
+    if (o.status === 'ACCEPTED') actions = `<button onclick="opsAction('${o.id}','prepare')">出荷準備を開始</button>`;
+    else if (o.status === 'PREPARING') actions = `<button onclick="opsAction('${o.id}','ship')">出荷を確定</button>`;
+    else if (o.status === 'SHIPPED') actions = `<button onclick="opsAction('${o.id}','deliver')">配達完了にする</button>`;
+    return `<div class="item">
+      <div>
+        <div class="name">${o.id.slice(0, 8)} <span class="note">${o.status_label || o.status}</span></div>
+        <div class="meta">${items} — ¥${(o.total ?? 0).toLocaleString()}
+          ${o.tracking_no ? `<span class="note">追跡 ${o.tracking_no}</span>` : ''}</div>
+      </div>
+      <div class="row">${actions}</div>
+    </div>`;
+  }).join('');
+}
+
+async function opsAction(orderId, action) {
+  const t0 = performance.now();
+  const r = await fetch(`/api/ops/orders/${orderId}/${action}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  const body = await r.json().catch(() => ({}));
+  const ms = Math.round(performance.now() - t0);
+  if (r.ok) {
+    log(`${orderId.slice(0, 8)} ${action} → ${body.status} (${ms}ms)`, 'l-ok');
+  } else {
+    const d = body.detail || {};
+    // **失敗しても「受付済」には戻らない**ことを、ログの文言でも示す
+    log(`${orderId.slice(0, 8)} ${action} 失敗: ${d.message || JSON.stringify(body)} (${ms}ms)`, 'l-ng');
+    if (d.status === 'PREPARING') log('  → 出荷準備中のまま停止しています。リトライで前進してください。', 'l-dim');
+  }
+  loadOrders();
+  loadCatalog();
+}
+
+async function shipAllAccepted() {
+  // BR-30: **注文ごとに独立して成否を判定する。** 1件の失敗が他を止めない
+  const targets = ORDERS.filter((o) => o.status === 'ACCEPTED').map((o) => o.id);
+  if (!targets.length) return log('受付済の注文がありません', 'l-dim');
+  log(`${targets.length} 件を一括処理します（1件の失敗は他を止めません）`, 'l-dim');
+  for (const id of targets) {
+    await opsAction(id, 'prepare');
+    await opsAction(id, 'ship');
+  }
+}
+
+loadCatalog();
+loadOrders();
+syncState();
+</script>
+</body>
+</html>

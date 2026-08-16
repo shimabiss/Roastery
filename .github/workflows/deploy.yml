@@ -1,0 +1,263 @@
+# ---------------------------------------------------------------------------
+# Azure Container Apps へのデプロイ (ADR-0003 Stage 2)
+#
+#   build → GHCR に push → OIDC で Azure 認証 → terraform apply
+#
+# セキュリティ (docs/security-checklist.md)
+#   - **長期シークレットを1つも置かない。** Azure へは Entra ID の
+#     Workload Identity Federation (OIDC) で、実行のたびに短命トークンを取る。
+#   - フェデレーション資格情報の subject は **環境スコープで固定する**。
+#       repo:<owner>/Roastery:environment:dev
+#     ワイルドカードにすると、フォークや任意ブランチからでも Azure に入れてしまう。
+#   - すべてのアクションを **40 桁の commit SHA で固定**する。タグは付け替えられる。
+#   - `pull_request_target` は使わない。PR からデプロイは走らせない。
+#
+# 必要な設定 (GitHub の Settings > Environments > dev)
+#   variables:
+#     AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
+#     TFSTATE_RESOURCE_GROUP / TFSTATE_STORAGE_ACCOUNT
+#   ※ いずれも秘密ではないので secrets ではなく variables でよい。
+#     **OIDC を使う限り、GitHub に置く長期シークレットはゼロになる。**
+#
+# 事前に一度だけ実行するもの
+#   ./scripts/tf-bootstrap.sh <owner>/Roastery dev
+#   （state 置き場・アプリ登録・フェデレーション資格情報・ロールを作る）
+# ---------------------------------------------------------------------------
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  # 手で流せるようにしておく。切り戻しはタグを指定して再実行する
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "デプロイするイメージタグ（空なら今回のコミット SHA）"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # 同じ環境への同時 apply を防ぐ。**Terraform の state が壊れる**
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  ENVIRONMENT: dev
+
+jobs:
+  # =========================================================================
+  # イメージのビルドと push
+  # =========================================================================
+  build:
+    name: build & push (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GHCR への push に必要
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: frontend
+            context: apps/frontend
+          - service: order-api
+            context: apps/order-api
+          - service: inventory-api
+            context: apps/inventory-api
+          - service: payment-api
+            context: apps/payment-api
+          - service: member-api
+            context: apps/member-api
+          - service: external-stub
+            context: apps/external-stub
+          # Collector だけ context が platform/ 配下。設定を焼き込むため
+          - service: otel-collector
+            context: platform/otel-collector
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # ---------------------------------------------------------------------
+      # **GHCR はリポジトリ名に大文字を許さない。**
+      # github.repository は "owner/Roastery" のように元の大小文字のまま来るので、
+      # そのままタグに使うと "repository name must be lowercase" で落ちる。
+      # リポジトリ名を小文字で作れば起きないが、**名前の付け方に依存させない。**
+      # ---------------------------------------------------------------------
+      - name: リポジトリ名を小文字にする
+        id: repo
+        run: echo "lower=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # ジョブ限りの自動トークン
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          # **タグは commit SHA で打つ。** latest だけだと
+          # 「いま何が動いているか」も「どこへ戻せばよいか」も分からなくなる
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.repo.outputs.lower }}/${{ matrix.service }}:sha-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.repo.outputs.lower }}/${{ matrix.service }}:main
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # =========================================================================
+  # Terraform で ACA を更新
+  # =========================================================================
+  terraform:
+    name: terraform apply (dev)
+    needs: build
+    runs-on: ubuntu-latest
+    # Environment を使うと、承認や環境固有の変数を後から足せる。
+    # OIDC の subject もこの名前で固定する
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write # OIDC トークンの発行に必要
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Terraform 側の image_repository も小文字でないと variables.tf の
+      # validation（GHCR の制約に合わせてある）で弾かれる
+      - name: リポジトリ名を小文字にする
+        id: repo
+        run: echo "lower=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      # --- OIDC で Azure にログイン。**シークレットは使わない** ------------
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.13.3"
+          terraform_wrapper: false
+
+      # state は Azure Storage に置く。**ローカル state のままだと
+      # CI は毎回まっさらな state で始まり、既存リソースを作ろうとして失敗する。**
+      # 置き場は scripts/tf-bootstrap.sh で一度だけ作ってある。
+      - name: terraform init
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=${{ env.ENVIRONMENT }}.terraform.tfstate"
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform plan
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_environment: ${{ env.ENVIRONMENT }}
+          TF_VAR_image_repository: ${{ steps.repo.outputs.lower }}
+          TF_VAR_image_tag: ${{ inputs.image_tag || format('sha-{0}', github.sha) }}
+        run: terraform plan -input=false -out=tfplan
+
+      - name: terraform apply
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: terraform apply -input=false tfplan
+
+      - name: 公開 URL を出力
+        run: |
+          echo "### デプロイ完了" >> "$GITHUB_STEP_SUMMARY"
+          echo "- サイト: $(terraform output -raw site_url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- タグ: ${{ inputs.image_tag || format('sha-{0}', github.sha) }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # =========================================================================
+  # デプロイ後の検証。**「apply が成功した」と「動いている」は別**
+  # =========================================================================
+  smoke:
+    name: smoke test
+    needs: terraform
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.13.3"
+          terraform_wrapper: false
+      - name: terraform init
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=${{ env.ENVIRONMENT }}.terraform.tfstate"
+
+      - name: /healthz が 200 を返すまで待つ
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          URL="$(terraform output -raw site_url)"
+          echo "target: $URL"
+          # min_replicas = 0 のときは最初の1回がコールドスタートになる。
+          # **ここで待たないと「デプロイ直後だけ落ちている」ように見える**
+          for i in $(seq 1 30); do
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$URL/healthz" || true)"
+            [ "$CODE" = "200" ] && { echo "healthy after ${i} attempts"; exit 0; }
+            echo "  attempt ${i}: HTTP ${CODE}"
+            sleep 10
+          done
+          echo "::error::5 分待っても /healthz が 200 になりませんでした"
+          exit 1
+
+      - name: カタログが引けること
+        run: |
+          set -euo pipefail
+          URL="$(terraform output -raw site_url)"
+          # 公開サイト → inventory-api → redis の経路が通っているかを見る。
+          # **フロントが上がっただけでは、内部の疎通は分からない**
+          curl -fsS -m 30 "$URL/api/catalog" | head -c 200
+          echo

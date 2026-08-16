@@ -1,0 +1,87 @@
+# ===========================================================================
+# OpenTelemetry Collector 設定 (Azure Container Apps 用)
+#
+# config.yaml との違いは **エクスポータだけ** である。
+#   config.yaml       … Azure Monitor + Jaeger + Prometheus (ローカル併用)
+#   config.local.yaml … Jaeger + Prometheus のみ (Azure を使わない検証)
+#   config.aca.yaml   … Azure Monitor のみ            ← このファイル
+#
+# なぜ分けるのか
+# --------------
+# ACA には Jaeger も Prometheus も立てていない。config.yaml のまま動かすと、
+# **Collector が jaeger:4317 への接続に失敗し続けてログが埋まる。**
+# テレメトリ自体は Azure Monitor に届くので気づきにくく、
+# 「動いているが常時エラーを吐いている」という最も厄介な状態になる。
+#
+# receivers / processors は3つの設定で同一にしてある。
+# **差分をエクスポータだけに閉じ込める**と、どこが環境依存かが一目で分かる。
+# ===========================================================================
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:DEPLOY_ENV}
+        action: upsert
+      - key: service.namespace
+        value: roastery
+        action: upsert
+
+  # PII マスク。**本番相当の経路ではこれが効いていることを必ず確認する。**
+  # ローカルでは「動いているように見える」だけで、実際にハッシュ化されているかは
+  # Azure 側の enduser_Id を見ないと分からない。
+  attributes/redact:
+    actions:
+      - key: enduser.id
+        action: hash
+
+exporters:
+  azuremonitor:
+    connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+    spaneventsenabled: true
+    maxbatchsize: 512
+    maxbatchinterval: 10s
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  # zpages は外しておく。ACA では ingress を 4317 にしか開いていないので
+  # 到達できず、開けると認証の無い管理画面を1つ増やすことになる。
+  extensions: [health_check]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, attributes/redact, batch]
+      exporters: [azuremonitor]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [azuremonitor]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, attributes/redact, batch]
+      exporters: [azuremonitor]
+
+  telemetry:
+    logs:
+      level: info

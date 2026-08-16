@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  # Collector が prometheus exporter で公開したアプリのメトリクス
+  - job_name: otel-collector-apps
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # Collector 自身の内部メトリクス (キュー詰まり・ドロップの監視に使う)
+  - job_name: otel-collector-internal
+    static_configs:
+      - targets: ["otel-collector:8888"]

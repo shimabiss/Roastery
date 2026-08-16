@@ -1,0 +1,8 @@
+node_modules
+dist
+.vite
+
+# 画像の元ファイル（20MB）。変換後の WebP/JPEG だけをイメージに入れる。
+# ここに書かないと **ビルドコンテキストに 20MB 転送され、builder レイヤーにも残る**。
+# Vite の glob は products/ と hero-* しか見ないので、機能上は使われない。
+client/assets/_original
