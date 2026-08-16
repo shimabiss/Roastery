@@ -136,19 +136,78 @@ SP_OBJECT_ID="$(az ad sp show --id "$APP_ID" --query id -o tsv)"
 # **任意のブランチ・任意の PR から Azure に入れてしまう。**
 # Public リポジトリでは、それは「誰でも入れる」と同義になる。
 # ---------------------------------------------------------------------------
-SUBJECT="repo:${REPO}:environment:${ENVIRONMENT}"
-CRED_NAME="${APP_NAME}-env"
-if ! az ad app federated-credential list --id "$APP_ID" \
-      --query "[?subject=='${SUBJECT}'] | [0]" -o tsv 2>/dev/null | grep -q .; then
+# 資格情報を1件登録する（既にあれば何もしない）
+add_federated_credential() {
+  local subject="$1" name="$2"
+  if az ad app federated-credential list --id "$APP_ID" \
+       --query "[?subject=='${subject}'] | [0].name" -o tsv 2> /dev/null | grep -q .; then
+    echo "  設定済み : ${subject}"
+    return
+  fi
   az ad app federated-credential create --id "$APP_ID" --parameters "{
-    \"name\": \"${CRED_NAME}\",
+    \"name\": \"${name}\",
     \"issuer\": \"https://token.actions.githubusercontent.com\",
-    \"subject\": \"${SUBJECT}\",
+    \"subject\": \"${subject}\",
     \"audiences\": [\"api://AzureADTokenExchange\"]
   }" -o none
-  echo "フェデレーション資格情報を作成しました: ${SUBJECT}"
+  echo "  作成しました : ${subject}"
+}
+
+REGISTERED_SUBJECTS=()
+
+# --- 名前ベースの subject（従来の形式）-------------------------------------
+NAME_SUBJECT="repo:${REPO}:environment:${ENVIRONMENT}"
+add_federated_credential "$NAME_SUBJECT" "${APP_NAME}-env"
+REGISTERED_SUBJECTS+=("$NAME_SUBJECT")
+
+# ---------------------------------------------------------------------------
+# --- ID ベースの subject（immutable subject）--------------------------------
+#
+# **GitHub は 2026-07-15 以降に作成・改名・移管されたリポジトリについて、
+# subject を数値 ID 入りの形式で発行する。**
+#
+#   repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>
+#
+# 名前ベースの subject しか登録していないと、認証が
+#   AADSTS700213: No matching federated identity record found
+# で落ちる。ID はリポジトリを改名しても変わらないため、**名前ベースより安全**
+# （名前を手放した後に第三者が同名を取る、という経路を塞げる）。
+#
+# 両方登録しておけば、どちらの形式で来ても通る。
+#
+# ID は公開 API から引く。取れない環境では、エラー文に出ている値を
+# 環境変数で渡してから再実行する:
+#   OWNER_ID=34046622 REPO_ID=1336013213 ./scripts/tf-bootstrap.sh <owner>/<repo> dev
+# ---------------------------------------------------------------------------
+OWNER="${REPO%%/*}"
+REPO_NAME="${REPO##*/}"
+OWNER_ID="${OWNER_ID:-}"
+REPO_ID="${REPO_ID:-}"
+
+if [ -z "$OWNER_ID" ] || [ -z "$REPO_ID" ]; then
+  REPO_JSON="$(curl -fsSL --max-time 20 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'User-Agent: roastery-bootstrap' \
+    "https://api.github.com/repos/${REPO}" 2> /dev/null || true)"
+
+  if [ -n "$REPO_JSON" ]; then
+    if command -v python3 > /dev/null 2>&1; then
+      OWNER_ID="${OWNER_ID:-$(printf '%s' "$REPO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["owner"]["id"])' 2> /dev/null || true)}"
+      REPO_ID="${REPO_ID:-$(printf '%s' "$REPO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2> /dev/null || true)}"
+    elif command -v jq > /dev/null 2>&1; then
+      OWNER_ID="${OWNER_ID:-$(printf '%s' "$REPO_JSON" | jq -r '.owner.id')}"
+      REPO_ID="${REPO_ID:-$(printf '%s' "$REPO_JSON" | jq -r '.id')}"
+    fi
+  fi
+fi
+
+if [ -n "$OWNER_ID" ] && [ -n "$REPO_ID" ]; then
+  IMMUTABLE_SUBJECT="repo:${OWNER}@${OWNER_ID}/${REPO_NAME}@${REPO_ID}:environment:${ENVIRONMENT}"
+  add_federated_credential "$IMMUTABLE_SUBJECT" "${APP_NAME}-env-immutable"
+  REGISTERED_SUBJECTS+=("$IMMUTABLE_SUBJECT")
 else
-  echo "フェデレーション資格情報は設定済みです: ${SUBJECT}"
+  echo "  ID ベースの資格情報は作成していません（GitHub API からリポジトリ ID を取得できませんでした）。"
+  echo "  AADSTS700213 が出た場合は、エラー文の ID を OWNER_ID / REPO_ID で渡して再実行してください。"
 fi
 
 # ---------------------------------------------------------------------------
@@ -200,9 +259,9 @@ GitHub 側の設定 (Settings > Environments > ${ENVIRONMENT} > Variables):
 
 注意:
   - Environment 名 "${ENVIRONMENT}" は変えないでください。
-    フェデレーション資格情報の subject が
-      ${SUBJECT}
-    で固定されているため、名前が違うと認証が通りません。
+    フェデレーション資格情報の subject を次で固定しているため、
+    名前が違うと認証が通りません。
+$(printf '      %s\n' "${REGISTERED_SUBJECTS[@]}")
   - 別環境 (stg / prd) を足すときは、このスクリプトを環境ごとに実行します。
 ===========================================================================
 EOF

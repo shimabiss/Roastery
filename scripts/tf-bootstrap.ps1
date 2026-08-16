@@ -42,7 +42,14 @@ param(
   # variables.tf の workload と揃える。リソース名の第2要素になる。
   # 長くするとストレージアカウント名の 24 文字上限に当たるので注意。
   [ValidatePattern('^[a-z][a-z0-9-]{1,20}$')]
-  [string]$Workload = 'roastery'
+  [string]$Workload = 'roastery',
+
+  # GitHub の immutable subject 用の数値 ID。
+  # 未指定なら公開 API から自動で引く。API に届かない環境では、
+  # AADSTS700213 のエラー文に出ている ID をそのまま渡す:
+  #   subject claim - repo:<owner>@<OwnerId>/<repo>@<RepoId>:environment:dev
+  [string]$OwnerId,
+  [string]$RepoId
 )
 
 Set-StrictMode -Version Latest
@@ -228,18 +235,27 @@ $SpObjectId = Invoke-Az @('ad', 'sp', 'show', '--id', $AppId, '--query', 'id', '
 # **任意のブランチ・任意の PR から Azure に入れてしまう。**
 # Public リポジトリでは、それは「誰でも入れる」と同義になる。
 # ---------------------------------------------------------------------------
-$Subject = "repo:${Repo}:environment:${Environment}"
-$existing = Invoke-Az @(
-  'ad', 'app', 'federated-credential', 'list', '--id', $AppId,
-  '--query', "[?subject=='$Subject'] | [0].name", '-o', 'tsv'
-) -AllowFailure
+function Add-FederatedCredential {
+  param(
+    [Parameter(Mandatory = $true)][string]$AppId,
+    [Parameter(Mandatory = $true)][string]$Subject,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  $found = Invoke-Az @(
+    'ad', 'app', 'federated-credential', 'list', '--id', $AppId,
+    '--query', "[?subject=='$Subject'] | [0].name", '-o', 'tsv'
+  ) -AllowFailure
 
-if ([string]::IsNullOrWhiteSpace($existing) -or $existing -eq 'null') {
+  if (-not [string]::IsNullOrWhiteSpace($found) -and $found -ne 'null') {
+    Write-Host "  設定済み : $Subject"
+    return
+  }
+
   # JSON を引数に直接埋めると PowerShell のクォート処理で壊れる。
   # **一時ファイルに書いて @file で渡す**のが確実。
   $credFile = (New-TemporaryFile).FullName
   $credJson = @{
-    name      = "$AppName-env"
+    name      = $Name
     issuer    = 'https://token.actions.githubusercontent.com'
     subject   = $Subject
     audiences = @('api://AzureADTokenExchange')
@@ -248,10 +264,60 @@ if ([string]::IsNullOrWhiteSpace($existing) -or $existing -eq 'null') {
 
   Invoke-Az @('ad', 'app', 'federated-credential', 'create', '--id', $AppId, '--parameters', "@$credFile", '-o', 'none') | Out-Null
   Remove-Item $credFile -Force
-  Write-Host "フェデレーション資格情報を作成しました: $Subject"
+  Write-Host "  作成しました : $Subject"
+}
+
+$RegisteredSubjects = @()
+
+# --- 名前ベースの subject（従来の形式）-------------------------------------
+$NameSubject = "repo:${Repo}:environment:${Environment}"
+Add-FederatedCredential -AppId $AppId -Name "$AppName-env" -Subject $NameSubject
+$RegisteredSubjects += $NameSubject
+
+# ---------------------------------------------------------------------------
+# --- ID ベースの subject（immutable subject）--------------------------------
+#
+# **GitHub は 2026-07-15 以降に作成・改名・移管されたリポジトリについて、
+# subject を数値 ID 入りの形式で発行する。**
+#
+#   repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<env>
+#
+# 名前ベースの subject しか登録していないと、認証が
+#   AADSTS700213: No matching federated identity record found
+# で落ちる。ID はリポジトリを改名しても変わらないため、
+# **名前ベースより安全**（名前を手放した後に第三者が同名を取る、を防げる）。
+#
+# 両方登録しておけば、どちらの形式で来ても通る。
+# ---------------------------------------------------------------------------
+$Owner, $RepoName = $Repo.Split('/')
+
+# -OwnerId / -RepoId が指定されていなければ GitHub の公開 API から引く。
+# 取れなくても止めない（プロキシ、レート制限、非公開リポジトリなどで失敗しうる）。
+if (-not $OwnerId -or -not $RepoId) {
+  # PowerShell 5.1 は既定で TLS 1.0/1.1 を使うことがあり、GitHub API に繋がらない
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+  try {
+    $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo" -Headers @{
+      'User-Agent' = 'roastery-bootstrap'
+      'Accept'     = 'application/vnd.github+json'
+    }
+    if (-not $OwnerId) { $OwnerId = [string]$info.owner.id }
+    if (-not $RepoId) { $RepoId = [string]$info.id }
+  }
+  catch {
+    Write-Host "  GitHub API からリポジトリ ID を取得できませんでした: $($_.Exception.Message)" -ForegroundColor Yellow
+  }
+}
+
+if ($OwnerId -and $RepoId) {
+  $ImmutableSubject = "repo:$Owner@$OwnerId/$RepoName@${RepoId}:environment:$Environment"
+  Add-FederatedCredential -AppId $AppId -Name "$AppName-env-immutable" -Subject $ImmutableSubject
+  $RegisteredSubjects += $ImmutableSubject
 }
 else {
-  Write-Host "フェデレーション資格情報は設定済みです: $Subject"
+  Write-Host '  ID ベースの資格情報は作成していません。' -ForegroundColor Yellow
+  Write-Host '  AADSTS700213 が出た場合は、エラーに表示された subject の ID を'
+  Write-Host "  -OwnerId / -RepoId で渡して、このスクリプトを再実行してください。"
 }
 
 # ---------------------------------------------------------------------------
@@ -312,9 +378,9 @@ Write-Host 'OIDC を使う限り、GitHub に置く長期シークレットは�
 Write-Host ''
 Write-Host '注意:'
 Write-Host "  - Environment 名 $quotedEnv は変えないでください。"
-Write-Host '    フェデレーション資格情報の subject が'
-Write-Host "      $Subject"
-Write-Host '    で固定されているため、名前が違うと認証が通りません。'
+Write-Host '    フェデレーション資格情報の subject を次で固定しているため、'
+Write-Host '    名前が違うと認証が通りません。'
+foreach ($s in $RegisteredSubjects) { Write-Host "      $s" }
 Write-Host '  - 別環境 (stg / prd) を足すときは、このスクリプトを環境ごとに実行します。'
 Write-Host '==========================================================================='  -ForegroundColor Green
 

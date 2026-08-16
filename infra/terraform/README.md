@@ -258,7 +258,7 @@ Actions → deploy → Run workflow → **`deploy_container_apps` を `false`** 
 
 | 症状 | 原因と対処 |
 |---|---|
-| `AADSTS70021: No matching federated identity record found` | Environment 名が `dev` でないか、subject のリポジトリ名の大小文字が違う。`az ad app federated-credential list --id <AZURE_CLIENT_ID>` で subject を確認する |
+| `AADSTS700213: No matching federated identity record found` | **エラー文の `subject claim - ...` を見るのが先決です。** `repo:<owner>@<数字>/<repo>@<数字>:environment:dev` の形なら、GitHub の immutable subject（2026-07-15 以降に作成・改名・移管されたリポジトリが対象）です。`tf-bootstrap` は名前ベースと ID ベースの両方を登録するので、再実行すれば通ります。名前ベースの形なら Environment 名かリポジトリ名の大小文字の不一致です。現状は `az ad app federated-credential list --id <AZURE_CLIENT_ID> --query "[].subject"` で確認できます |
 | `AuthorizationFailed` | ロール割り当てがまだ反映されていない。数分待って再実行 |
 | state の blob が 403 | サービスプリンシパルに `Storage Blob Data Contributor` が付いていない |
 | `The subscription is not registered to use namespace 'Microsoft.App'` | `az provider register --namespace Microsoft.App`（`Microsoft.OperationalInsights` も同様） |
