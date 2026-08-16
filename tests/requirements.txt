@@ -1,5 +1,21 @@
 # テスト専用の依存。CI はこれだけ入れれば走る (Redis も Postgres も要らない)。
+#
+# **バージョンは apps/*/requirements.txt と揃えること。**
+# ここだけ古いと「ローカルでは通るが CI で落ちる」が起きる。
 pytest==8.3.4
 pytest-asyncio==0.25.2
-fakeredis[lua]==2.26.2
+
+# fakeredis と redis はセットで上げる。
+# redis-py 6 以降は接続時に HELLO を投げるため、それを知らない古い fakeredis だと
+# `unknown command 'hello'` で **全テストが setup 段階で落ちる**。
+# redis は apps/inventory-api・member-api と同じ 8.1.0 に固定する。
+fakeredis[lua]==2.37.0
+redis==8.1.0
+
+# アプリ本体を import するために要る。テストは ASGI を直接叩くので uvicorn は不要。
+fastapi==0.141.1
+pydantic==2.13.4
+httpx==0.28.1
+
+# 計装は入れない (テストでスタブに差し替えている) が、api だけは import される。
 opentelemetry-api==1.44.0
