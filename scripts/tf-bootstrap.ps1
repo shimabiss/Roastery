@@ -37,13 +37,16 @@ param(
   [ValidateSet('dev', 'stg', 'prd')]
   [string]$Environment = 'dev',
 
-  [string]$Location = 'japaneast'
+  [string]$Location = 'japaneast',
+
+  # variables.tf の workload と揃える。リソース名の第2要素になる。
+  # 長くするとストレージアカウント名の 24 文字上限に当たるので注意。
+  [ValidatePattern('^[a-z][a-z0-9-]{1,20}$')]
+  [string]$Workload = 'roastery'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-$Workload = 'roastery'
 
 # ---------------------------------------------------------------------------
 # az CLI は失敗しても PowerShell の例外にならない（終了コードを返すだけ）。
@@ -113,17 +116,38 @@ if ($answer -notmatch '^[yY]') { Write-Host '中止しました。'; exit 0 }
 Write-Section 'state 置き場を用意します'
 Invoke-Az @('group', 'create', '-n', $StateRg, '-l', $Location, '-o', 'none') | Out-Null
 
+# ---------------------------------------------------------------------------
 # ストレージアカウント名は **グローバルで一意** かつ 3〜24 文字の英小文字と数字のみ。
+# ハイフンも大文字も使えず、**24 文字という上限が思ったより近い。**
+#
+#   "st" + "roastery" + "tfstate" = 17 文字 → 乱数に使えるのは 7 文字しかない。
+#
+# そこで乱数部の長さを固定せず、**残り文字数から決める。**
+# workload 名を長くしても壊れないようにするため。
+# ---------------------------------------------------------------------------
+$SaPrefix = ("st${Workload}tfstate").ToLower() -replace '[^a-z0-9]', ''
+if ($SaPrefix.Length -gt 20) { $SaPrefix = $SaPrefix.Substring(0, 20) }
+$SaRandomLength = [Math]::Min(8, 24 - $SaPrefix.Length)
+
 # 既に作ってあればそれを使い、無ければ乱数付きで作る。
 $SaName = Invoke-Az @(
   'storage', 'account', 'list', '-g', $StateRg,
-  '--query', "[?starts_with(name,'st${Workload}tfstate')].name | [0]", '-o', 'tsv'
+  '--query', "[?starts_with(name,'$SaPrefix')].name | [0]", '-o', 'tsv'
 ) -AllowFailure
 
 if ([string]::IsNullOrWhiteSpace($SaName) -or $SaName -eq 'null') {
-  $suffix = -join (1..4 | ForEach-Object { '{0:x2}' -f (Get-Random -Minimum 0 -Maximum 256) })
-  $SaName = "st${Workload}tfstate${suffix}"
-  Write-Host "ストレージアカウントを作成します: $SaName"
+  $suffix = -join (1..$SaRandomLength | ForEach-Object { '{0:x}' -f (Get-Random -Minimum 0 -Maximum 16) })
+  $SaName = "$SaPrefix$suffix"
+
+  # **作る前に自分で検証する。** az のエラーは分かりにくく、
+  # 「なぜその名前になったか」がメッセージから読み取れない。
+  if ($SaName -notmatch '^[a-z0-9]{3,24}$') {
+    Write-Host "ストレージアカウント名が規則に合いません: $SaName ($($SaName.Length) 文字)" -ForegroundColor Red
+    Write-Host '3〜24 文字の英小文字と数字のみです。-Workload に短い名前を指定してください。'
+    exit 1
+  }
+
+  Write-Host "ストレージアカウントを作成します: $SaName ($($SaName.Length) 文字)"
   Invoke-Az @(
     'storage', 'account', 'create',
     '-n', $SaName, '-g', $StateRg, '-l', $Location,

@@ -53,14 +53,35 @@ echo
 echo "--- state 置き場を用意します ---"
 az group create -n "$STATE_RG" -l "$LOCATION" -o none
 
+# ---------------------------------------------------------------------------
 # ストレージアカウント名は **グローバルで一意** かつ 3〜24 文字の英小文字と数字のみ。
+# ハイフンも大文字も使えず、**24 文字という上限が思ったより近い。**
+#
+#   "st" + "roastery" + "tfstate" = 17 文字 → 乱数に使えるのは 7 文字しかない。
+#
+# そこで乱数部の長さを固定せず、**残り文字数から決める。**
+# WORKLOAD を長くしても壊れないようにするため。
+# ---------------------------------------------------------------------------
+SA_PREFIX="$(printf 'st%stfstate' "$WORKLOAD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9' | cut -c1-20)"
+SA_RANDOM_LEN=$((24 - ${#SA_PREFIX}))
+[ "$SA_RANDOM_LEN" -gt 8 ] && SA_RANDOM_LEN=8
+
 # 既に作ってあればそれを使い、無ければ乱数付きで作る。
 SA_NAME="$(az storage account list -g "$STATE_RG" \
-  --query "[?starts_with(name,'st${WORKLOAD}tfstate')].name | [0]" -o tsv 2>/dev/null || true)"
+  --query "[?starts_with(name,'${SA_PREFIX}')].name | [0]" -o tsv 2>/dev/null || true)"
 
 if [ -z "$SA_NAME" ] || [ "$SA_NAME" = "null" ]; then
-  SA_NAME="st${WORKLOAD}tfstate$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  echo "ストレージアカウントを作成します: ${SA_NAME}"
+  SA_NAME="${SA_PREFIX}$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-"${SA_RANDOM_LEN}")"
+
+  # **作る前に自分で検証する。** az のエラーは
+  # 「なぜその名前になったか」がメッセージから読み取れない。
+  if ! printf '%s' "$SA_NAME" | grep -Eq '^[a-z0-9]{3,24}$'; then
+    echo "ストレージアカウント名が規則に合いません: ${SA_NAME} (${#SA_NAME} 文字)" >&2
+    echo "3〜24 文字の英小文字と数字のみです。WORKLOAD に短い名前を指定してください。" >&2
+    exit 1
+  fi
+
+  echo "ストレージアカウントを作成します: ${SA_NAME} (${#SA_NAME} 文字)"
   az storage account create \
     -n "$SA_NAME" -g "$STATE_RG" -l "$LOCATION" \
     --sku Standard_LRS --kind StorageV2 \
