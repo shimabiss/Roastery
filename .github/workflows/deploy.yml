@@ -47,6 +47,16 @@ on:
         description: "デプロイするイメージタグ（空なら今回のコミット SHA）"
         required: false
         type: string
+      deploy_container_apps:
+        description: "Container Apps 一式をデプロイするか。false なら監視基盤だけ残して止める"
+        required: false
+        default: "true"
+        # **boolean ではなく choice にしている。**
+        # boolean 入力は push で流したときに空になり、GitHub の式は比較時に
+        # 数値へ寄せるため `'' == false` が **真になってしまう**。
+        # 「未指定」と「false」を区別できなくなるので、文字列で持つ。
+        type: choice
+        options: ["true", "false"]
 
 permissions:
   contents: read
@@ -63,6 +73,21 @@ env:
 jobs:
   # =========================================================================
   # イメージのビルドと push
+  #
+  # **初回だけ手作業が要る。**
+  # GHCR に作られるパッケージは個人アカウント配下だと **既定で private** になる。
+  # 一方 ACA 側には registry の資格情報を渡していない (container-apps.tf に
+  # registry ブロックが無い) ので、private のままだと pull できず
+  # リビジョンが ImagePullFailure で起動しない。
+  #
+  # 初回の push 後に 7 つのパッケージを public にすること:
+  #   https://github.com/users/<owner>/packages
+  #     → 各パッケージ → Package settings → Danger Zone → Change visibility → Public
+  #
+  # **private のまま使うなら PAT を ACA に渡すことになり、
+  # 「長期シークレットを置かない」という本ワークフローの前提と衝突する。**
+  # リポジトリ自体が Public なので、イメージを public にして困ることは無い。
+  # (なお public から private へは戻せない)
   # =========================================================================
   build:
     name: build & push (${{ matrix.service }})
@@ -190,6 +215,8 @@ jobs:
           TF_VAR_environment: ${{ env.ENVIRONMENT }}
           TF_VAR_image_repository: ${{ steps.repo.outputs.lower }}
           TF_VAR_image_tag: ${{ inputs.image_tag || format('sha-{0}', github.sha) }}
+          # 未指定 (push で起動した場合) は true に倒す
+          TF_VAR_deploy_container_apps: ${{ inputs.deploy_container_apps == '' && 'true' || inputs.deploy_container_apps }}
         run: terraform plan -input=false -out=tfplan
 
       - name: terraform apply
@@ -203,7 +230,14 @@ jobs:
       - name: 公開 URL を出力
         run: |
           echo "### デプロイ完了" >> "$GITHUB_STEP_SUMMARY"
-          echo "- サイト: $(terraform output -raw site_url)" >> "$GITHUB_STEP_SUMMARY"
+          # deploy_container_apps = false のときは site_url が null になる。
+          # **ここで落とすと、apply は成功しているのにジョブが赤くなる。**
+          URL="$(terraform output -raw site_url 2> /dev/null || true)"
+          if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+            echo "- サイト: $URL" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Container Apps は無効です (deploy_container_apps = false)" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "- タグ: ${{ inputs.image_tag || format('sha-{0}', github.sha) }}" >> "$GITHUB_STEP_SUMMARY"
 
   # =========================================================================
@@ -212,6 +246,8 @@ jobs:
   smoke:
     name: smoke test
     needs: terraform
+    # Container Apps を作っていない run には検証対象が無い
+    if: ${{ inputs.deploy_container_apps != 'false' }}
     runs-on: ubuntu-latest
     environment: dev
     permissions:

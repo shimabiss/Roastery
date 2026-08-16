@@ -192,19 +192,36 @@ infra/terraform/
 
 ## Azure へデプロイする
 
+**2段階で進めます。** 1回目で認証・state・plan/apply の経路だけを通し、
+2回目で Container Apps を載せます。一度に全部やると、失敗したときに
+**「認証が通っていないのか」「ACA の定義が悪いのか」が切り分けられません。**
+
 ### 1. 一度だけ: state 置き場と OIDC を作る
+
+bash（WSL2 / Cloud Shell / macOS）:
 
 ```bash
 az login
 ./scripts/tf-bootstrap.sh <GitHubユーザー名>/Roastery dev
 ```
 
+PowerShell（Windows）:
+
+```powershell
+az login
+az account set --subscription "<サブスクリプション名またはID>"
+.\scripts\tf-bootstrap.ps1 -Repo <GitHubユーザー名>/Roastery
+```
+
+**どちらも作られるものは同じです。** 何度実行しても結果は変わりません
+（既にあるものは作り直しません）。
+
 このスクリプトが作るもの:
 
 - state 用のリソースグループ / ストレージアカウント / コンテナ
 - GitHub Actions 用の Entra ID アプリ
 - **環境スコープのフェデレーション資格情報**（`repo:<owner>/Roastery:environment:dev`）
-- 必要なロール割り当て
+- 必要なロール割り当て（Contributor / Storage Blob Data Contributor）
 
 > subject をワイルドカードにすると、**フォークや任意ブランチからでも Azure に入れます。**
 > Public リポジトリでは「誰でも入れる」と同義なので、必ず環境スコープで固定します。
@@ -226,12 +243,78 @@ Settings → Environments → `dev` → Variables:
 いずれも秘密情報ではないので `secrets` ではなく `variables` で構いません。
 **OIDC を使う限り、GitHub に置く長期シークレットはゼロになります。**
 
-### 3. 手元から apply する場合
+Environment 名は `dev` から変えないでください。フェデレーション資格情報の
+subject が `repo:<owner>/Roastery:environment:dev` で固定されています。
+
+### 3. 1回目: 監視基盤だけを apply する
+
+Actions → deploy → Run workflow → **`deploy_container_apps` を `false`** にして実行。
+
+- `build` … 7つのイメージをビルドして GHCR に push する（**ここは毎回走る**）
+- `terraform` … Log Analytics と Application Insights だけを作る
+- `smoke` … スキップされる（まだ検証対象が無いため）
+
+**ここで確かめているのは OIDC 認証と state の経路です。** よくある失敗:
+
+| 症状 | 原因と対処 |
+|---|---|
+| `AADSTS70021: No matching federated identity record found` | Environment 名が `dev` でないか、subject のリポジトリ名の大小文字が違う。`az ad app federated-credential list --id <AZURE_CLIENT_ID>` で subject を確認する |
+| `AuthorizationFailed` | ロール割り当てがまだ反映されていない。数分待って再実行 |
+| state の blob が 403 | サービスプリンシパルに `Storage Blob Data Contributor` が付いていない |
+| `The subscription is not registered to use namespace 'Microsoft.App'` | `az provider register --namespace Microsoft.App`（`Microsoft.OperationalInsights` も同様） |
+
+### 4. GHCR のパッケージを public にする ← **忘れやすい**
+
+`build` が通ると `https://github.com/users/<owner>/packages` に7つのパッケージができます。
+**個人アカウント配下のパッケージは既定で private です。**
+一方 ACA には registry の資格情報を渡していない（`container-apps.tf` に
+`registry` ブロックが無い）ため、private のままだと `ImagePullFailure` で
+リビジョンが起動しません。
+
+各パッケージ → Package settings → Danger Zone → Change visibility → **Public**
+
+対象は `roastery/frontend` `roastery/order-api` `roastery/inventory-api`
+`roastery/payment-api` `roastery/member-api` `roastery/external-stub`
+`roastery/otel-collector` の7つです。
+
+> private のまま使うなら PAT を ACA に渡すことになり、
+> **「長期シークレットを置かない」という前提と衝突します。**
+> リポジトリ自体が Public なので、イメージを public にして困ることはありません。
+> ただし **public から private には戻せません。**
+
+### 5. 2回目: Container Apps を載せる
+
+Actions → deploy → Run workflow → `deploy_container_apps` は既定の `true` のまま実行。
+
+`smoke` ジョブが `/healthz` と `/api/catalog` まで確認します。
+**「apply が成功した」と「動いている」は別**なので、ここが緑になって初めて完了です。
+公開 URL は Actions のサマリに出ます。
+
+`min_replicas = 0` なので最初の1リクエストはコールドスタートで数秒かかります。
+`smoke` はそれを見越して最大5分待ちます。
+
+### 6. push で自動デプロイに切り替える（任意）
+
+ここまで通ったら `.github/workflows/deploy.yml` の `on:` に push を戻します。
+
+```yaml
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    ...
+```
+
+**準備が済むまで戻さない**のは、`AZURE_CLIENT_ID` が無い状態で push のたびに
+失敗すると、「赤い × が付いているのが普通」になってしまうためです。
+そうなると本当の失敗に気づけなくなります。
+
+### 7. 手元から apply する場合
 
 ```bash
 cd infra/terraform
 cp terraform.tfvars.example terraform.tfvars
-# image_repository = "<GitHubユーザー名>/Roastery" を設定する（必須）
+# image_repository = "<GitHubユーザー名を小文字で>/roastery" を設定する（必須）
 
 terraform init -backend-config=backend.hcl
 terraform plan
@@ -240,21 +323,30 @@ terraform apply
 terraform output -raw site_url
 ```
 
-イメージは GHCR に push 済みである必要があります。`main` に push すると
-`.github/workflows/deploy.yml` がビルドから apply まで実行します。
+**GHCR はリポジトリ名に大文字を許しません。** `Roastery` ではなく `roastery` と書きます
+（`variables.tf` の validation でも弾かれます）。CI 側は `${GITHUB_REPOSITORY,,}` で
+自動的に小文字化しているので、この注意が要るのは手元から流すときだけです。
 
-### 4. コストを止める
+### 8. コストを止める
 
 アイドル時に課金が出るのは `postgres` / `redis` / `otel-collector` の**3つだけ**です
 （`min_replicas = 1` のため）。アプリは 0 までスケールインします。
 
-使わない期間は次で止められます。
+この3つで常時 **1.0 vCPU / 2.0 GiB** を占有します。30日で約 259万 vCPU 秒・518万 GiB 秒に
+なり、Container Apps の無料枠（サブスクリプションあたり月 18万 vCPU 秒 / 36万 GiB 秒）を
+**十数倍超えます。** 大半はアイドル料金が適用されますが、ゼロにはなりません。
+
+- **デプロイ前に予算アラートを設定してください**（Cost Management → 予算）
+- 実際の金額は1〜2日動かしてから Cost Management で確認するのが確実です
+
+使わない期間は止められます。
 
 ```bash
 terraform apply -var deploy_container_apps=false
 ```
 
-Log Analytics と Application Insights は残るので、ローカルの docker compose から
+GitHub Actions から止める場合は Run workflow で `deploy_container_apps` を `false` に
+します。Log Analytics と Application Insights は残るので、ローカルの docker compose から
 テレメトリを送る構成はそのまま使えます。
 
 ## 既知の未対応

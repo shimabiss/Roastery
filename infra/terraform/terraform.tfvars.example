@@ -36,7 +36,10 @@
 # --- Azure Container Apps (ADR-0003 Stage 2) --------------------------------
 
 # **image_repository は必須です。** GHCR なら "<GitHubユーザー名>/roastery"。
-# image_repository = "your-name/Roastery"
+#
+# **すべて小文字で書いてください。** GHCR はリポジトリ名に大文字を許さず、
+# variables.tf の validation でも弾かれます（リポジトリ名が Roastery でも roastery）。
+# image_repository = "your-name/roastery"
 
 # デプロイするタグ。CI からはコミット SHA (sha-xxxxxxx) が渡されます。
 # 手で apply するときは、GHCR に push 済みのタグを指定してください。
