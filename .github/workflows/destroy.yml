@@ -55,6 +55,10 @@ jobs:
       # if: で弾くとジョブが「スキップ」になり、**成功と見分けがつかない。**
       # 明示的に落として理由をログに出す
       - name: 確認文字列を検証する
+        # **defaults.run.working-directory は最初のステップから効く。**
+        # このステップは checkout より前にあるので infra/terraform がまだ無く、
+        # 上書きしないと「bash を起動できない」で落ちる（判定にすら到達しない）。
+        working-directory: ${{ github.workspace }}
         run: |
           if [ "${{ inputs.confirm }}" != "destroy-${{ env.ENVIRONMENT }}" ]; then
             echo "::error::confirm に 'destroy-${{ env.ENVIRONMENT }}' と入力してください（入力値: '${{ inputs.confirm }}'）"
