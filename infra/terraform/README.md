@@ -392,6 +392,21 @@ terraform destroy
 > 変数に既定値が無いため、指定しないと destroy 自体が始まりません。
 > ワークフローは自動で渡しています。手元から流す場合は `terraform.tfvars` に書いておいてください。
 
+> **リソースグループの削除で止まった場合**
+>
+> ```
+> Error: deleting Resource Group ...: the Resource Group still contains Resources.
+> * .../microsoft.insights/actiongroups/Application Insights Smart Detection
+> ```
+>
+> Application Insights を作ると、**Azure が同じリソースグループに
+> Smart Detection のアクショングループを勝手に作ります。** Terraform の管理外なので
+> destroy されず、リソースグループ削除の安全弁に引っかかります。
+>
+> `providers.tf` の `prevent_deletion_if_contains_resources = false` で対処済みです。
+> **これは安全弁を外す設定なので、Terraform が単独で所有しているリソースグループに
+> だけ許されます。** 共用のグループでは絶対に false にしないでください。
+
 **Log Analytics は削除後 14 日間、同名で再作成できません**（論理削除）。
 すぐ作り直したい場合は `var.instance` を `002` に上げるか、次で完全削除します。
 
