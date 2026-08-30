@@ -385,12 +385,12 @@ for i in $(seq 1 12); do
   if [ -z "$MISSING" ]; then FOUND=1; break; fi
 done
 if [ "$FOUND" = "1" ]; then
-  ok "4サービスすべてが Jaeger に登録された"
+  ok "6サービスすべてが Jaeger に登録された"
 else
   ng "Jaeger に未登録のサービスがあります:$MISSING"
 fi
 
-# 4サービスを跨ぐ trace が実際に1本になっているか
+# 6サービスを跨ぐ trace が実際に1本になっているか
 TRACE=$(curl -fsS -m 10 "http://localhost:16686/api/traces?service=frontend&operation=POST%20%2Fapi%2Fcheckout&limit=5" 2>/dev/null || echo '')
 COUNT=$(echo "$TRACE" | grep -o '"serviceName"' | wc -l | tr -d ' ')
 if [ "${COUNT:-0}" -gt 10 ]; then
